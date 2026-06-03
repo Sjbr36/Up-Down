@@ -2,6 +2,7 @@ import streamlit as st
 from supabase import create_client, Client
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import requests
 
 
 def get_supabase_client() -> Client:
@@ -13,7 +14,29 @@ def get_supabase_client() -> Client:
     return create_client(url, key)
 
 
-def fetch_exercise_catalog() -> List[Dict[str, Any]]:
+def fetch_exercise_catalog(access_token: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch exercises. If access_token supplied, use PostgREST with Authorization header so RLS applies."""
+    url = st.secrets.get("supabase_url")
+    anon_key = st.secrets.get("supabase_key")
+    if not url or not anon_key:
+        st.error("Supabase connection secrets are missing. Please set supabase_url and supabase_key in Streamlit secrets.")
+        st.stop()
+
+    if access_token:
+        rest_url = url.rstrip('/') + '/rest/v1/exercises'
+        headers = {
+            'apikey': anon_key,
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json',
+        }
+        try:
+            resp = requests.get(rest_url + '?select=*&order=primary_muscle_group', headers=headers, timeout=10)
+            resp.raise_for_status()
+            return resp.json() or []
+        except Exception:
+            # Fall back to anon client if user fetch fails
+            pass
+
     supabase = get_supabase_client()
     resp = supabase.table("exercises").select("*").order("primary_muscle_group").order("name").execute()
     return resp.data or []

@@ -13,6 +13,7 @@ from database import (
 )
 from strava import create_strava_activity, build_strava_description
 import streamlit.components.v1 as components
+from supabase import create_client
 
 st.set_page_config(
     page_title="Weightlifting Tracker",
@@ -31,6 +32,70 @@ def init_session_state() -> None:
         st.session_state["current_workout"] = {}
     if "active_template_id" not in st.session_state:
         st.session_state["active_template_id"] = None
+    if "access_token" not in st.session_state:
+        st.session_state["access_token"] = None
+
+
+def supabase_send_magic_link(email: str) -> bool:
+        url = st.secrets.get("supabase_url")
+        anon_key = st.secrets.get("supabase_key")
+        if not url or not anon_key:
+                st.error("Supabase connection secrets are missing. Please set supabase_url and supabase_key in Streamlit secrets.")
+                return False
+        client = create_client(url, anon_key)
+        try:
+                # Request a magic link be sent to the email. Supabase will email a link that redirects back to the app.
+                resp = client.auth.sign_in({"email": email})
+                # resp may be a dict with 'message' or empty; treat as success if no exception
+                return True
+        except Exception as exc:
+                st.error(f"Error sending magic link: {exc}")
+                return False
+
+
+def handle_redirect_token():
+        # This injects JS to move access_token from URL hash to query param so Streamlit can read it.
+        html = """
+        <script>
+        (function(){
+            try {
+                const hash = window.location.hash || '';
+                if (!hash) return;
+                const params = new URLSearchParams(hash.replace(/^#/,''));
+                const token = params.get('access_token') || params.get('access-token');
+                if (!token) return;
+                // Replace URL with token in query param (so server-side Streamlit can read it), removing hash
+                const qp = new URLSearchParams(window.location.search);
+                qp.set('access_token', token);
+                const newUrl = window.location.pathname + '?' + qp.toString();
+                window.history.replaceState({}, document.title, newUrl);
+                // Optionally reload so Streamlit picks up the param
+                window.location.reload();
+            } catch(e) { console.log(e); }
+        })();
+        </script>
+        """
+        components.html(html, height=0)
+
+
+def supabase_sign_in(email: str, password: str):
+    url = st.secrets.get("supabase_url")
+    anon_key = st.secrets.get("supabase_key")
+    if not url or not anon_key:
+        st.error("Supabase connection secrets are missing. Please set supabase_url and supabase_key in Streamlit secrets.")
+        return None
+    client = create_client(url, anon_key)
+    try:
+        resp = client.auth.sign_in_with_password({"email": email, "password": password})
+        # resp may contain 'session' key
+        session = resp.get("session") if isinstance(resp, dict) else resp
+        if session and isinstance(session, dict):
+            return session.get("access_token")
+        # fallback: resp may directly be a dict with access_token
+        return resp.get("access_token") if isinstance(resp, dict) else None
+    except Exception as exc:
+        st.error(f"Sign-in error: {exc}")
+        return None
 
 
 def render_timer_component(duration_seconds: int) -> None:
@@ -106,7 +171,7 @@ def render_timer_component(duration_seconds: int) -> None:
 def render_builder_page() -> None:
     st.markdown("## Workout Builder")
     st.markdown("Design reusable templates with group-based exercise selection and clean workout structure.")
-    exercises = fetch_exercise_catalog()
+    exercises = fetch_exercise_catalog(st.session_state.get("access_token"))
     groups = sorted({exercise["primary_muscle_group"] for exercise in exercises})
     grouped = {group: [e for e in exercises if e["primary_muscle_group"] == group] for group in groups}
 
@@ -174,7 +239,7 @@ def render_builder_page() -> None:
 
 def build_workout_state(template_id: str) -> Dict[str, Any]:
     template_exercises = fetch_template_exercises(template_id)
-    exercise_catalog = {e["id"]: e for e in fetch_exercise_catalog()}
+    exercise_catalog = {e["id"]: e for e in fetch_exercise_catalog(st.session_state.get("access_token"))}
     workout_exercises = []
     for row in template_exercises:
         exercise = exercise_catalog.get(row["exercise_id"])
@@ -340,8 +405,54 @@ def finish_workout(current_workout: Dict[str, Any]) -> None:
 
 def main() -> None:
     init_session_state()
+    # Handle possible redirect token placed into query params by JS
+    qp = st.query_params
+    if qp.get("access_token"):
+        token = qp.get("access_token")[0]
+        st.session_state["access_token"] = token
+        # clear query params
+        st.query_params = {}
+
+    # Inject client-side handler to convert hash token to query param
+    handle_redirect_token()
+
     st.markdown("# Weightlifting Tracker")
     st.markdown("A clean, high-contrast workout builder and logging experience for the gym.")
+
+    # Sidebar auth controls
+    with st.sidebar:
+        st.header("Account")
+        if st.session_state.get("access_token"):
+            st.success("Signed in")
+            if st.button("Sign out"):
+                st.session_state["access_token"] = None
+                st.experimental_rerun()
+        else:
+            st.markdown("### Sign in")
+            with st.form("auth_form"):
+                email = st.text_input("Email", key="auth_email")
+                password = st.text_input("Password", type="password", key="auth_password")
+                submitted = st.form_submit_button("Sign in")
+            if submitted:
+                token = supabase_sign_in(email, password)
+                if token:
+                    st.session_state["access_token"] = token
+                    st.success("Signed in")
+                    st.experimental_rerun()
+                else:
+                    st.error("Sign in failed. Check credentials or Supabase settings.")
+
+            st.markdown("---")
+            st.markdown("### Passwordless (Magic Link)")
+            with st.form("magic_form"):
+                magic_email = st.text_input("Email for magic link", key="magic_email")
+                send_magic = st.form_submit_button("Send Magic Link")
+            if send_magic:
+                ok = supabase_send_magic_link(magic_email)
+                if ok:
+                    st.info("Magic link sent — check your email and click the link to sign in.")
+                else:
+                    st.error("Failed to send magic link. Check Supabase settings and email deliverability.")
 
     page = st.sidebar.selectbox("Navigation", ["Workout Builder", "Workout Logger"])
     if page == "Workout Builder":
