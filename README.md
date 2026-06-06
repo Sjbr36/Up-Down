@@ -41,33 +41,31 @@ Create a file at `.streamlit/secrets.toml` with the following keys (or use Strea
 ```toml
 # .streamlit/secrets.toml
 supabase_url = "https://your-project-ref.supabase.co"
-supabase_key = "your-service-role-or-api-key"
+supabase_key = "your-supabase-anon-public-key"
 
 [strava]
 access_token = "YOUR_STRAVA_ACCESS_TOKEN"
 ```
 
 Notes:
-- `supabase_key` may be the anon public key for client-side or a service_role key for server-side operations depending on your use case. Keep secrets secure.
+- Users sign in through Supabase Auth with email and password.
+- Use the Supabase anon public key for `supabase_key`. Do not use a service role key in the Streamlit app because service role keys bypass Row Level Security.
 - If you do not provide `strava.access_token`, Strava upload attempts will be skipped and a warning will be shown.
 
-Authentication (Magic Link)
-
-- In the Supabase console go to `Authentication` → `Emails` (or `Authentication` → `Email` depending on console version) and enable **Magic Link** / passwordless sign-in.
-- Add your app redirect URL(s) to the Allowed Redirect URLs list. For local development add `http://localhost:8501` and for Streamlit Cloud add your app URL (for example `https://share.streamlit.io/<your-user>/<your-repo>/main`).
-- Use the anon/public `supabase_key` in your Streamlit secrets for client-side auth flows. The app provides a magic link sender and will capture the returned token on redirect.
-
-After enabling Magic Link, the sidebar in the app lets you request a magic link to the email you provide. Clicking the emailed link will redirect back to the app and sign you in automatically.
+Create the first three users in Supabase Dashboard > Authentication > Users. The app does not expose public sign-up; only users you create in Supabase can sign in.
 
 4. Run the database migration
 
-You can apply the SQL migration with the Supabase SQL editor, or via `psql` if you have direct DB access. Example using `psql`:
+Apply the SQL migrations in order with the Supabase SQL editor, or via `psql` if you have direct DB access. Example using `psql`:
 
 ```bash
 psql "postgresql://<db_user>:<db_password>@<host>:5432/<db_name>" -f migrations/0001_weightlifting_schema.sql
+psql "postgresql://<db_user>:<db_password>@<host>:5432/<db_name>" -f migrations/0002_user_auth_rls.sql
 ```
 
-Or paste the contents of `migrations/0001_weightlifting_schema.sql` into the Supabase SQL editor and run it.
+Or paste the contents of each migration into the Supabase SQL editor and run them in filename order.
+
+`0002_user_auth_rls.sql` adds `user_id` ownership columns and enables Row Level Security so each authenticated user can only access their own workout templates, workout logs, and set history. Existing templates and workout logs without a `user_id` will be hidden by RLS until you assign them to a Supabase Auth user.
 
 5. Run the app
 

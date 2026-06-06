@@ -1,7 +1,9 @@
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List
 from database import (
+    sign_in_user,
+    sign_out_user,
     fetch_exercise_catalog,
     fetch_templates,
     fetch_template_exercises,
@@ -13,7 +15,6 @@ from database import (
 )
 from strava import create_strava_activity, build_strava_description
 import streamlit.components.v1 as components
-from supabase import create_client
 
 st.set_page_config(
     page_title="Weightlifting Tracker",
@@ -32,70 +33,36 @@ def init_session_state() -> None:
         st.session_state["current_workout"] = {}
     if "active_template_id" not in st.session_state:
         st.session_state["active_template_id"] = None
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+    if "auth_user" not in st.session_state:
+        st.session_state["auth_user"] = None
     if "access_token" not in st.session_state:
         st.session_state["access_token"] = None
+    if "refresh_token" not in st.session_state:
+        st.session_state["refresh_token"] = None
 
 
-def supabase_send_magic_link(email: str) -> bool:
-        url = st.secrets.get("supabase_url")
-        anon_key = st.secrets.get("supabase_key")
-        if not url or not anon_key:
-                st.error("Supabase connection secrets are missing. Please set supabase_url and supabase_key in Streamlit secrets.")
-                return False
-        client = create_client(url, anon_key)
-        try:
-                # Request a magic link be sent to the email. Supabase will email a link that redirects back to the app.
-                resp = client.auth.sign_in({"email": email})
-                # resp may be a dict with 'message' or empty; treat as success if no exception
-                return True
-        except Exception as exc:
-                st.error(f"Error sending magic link: {exc}")
-                return False
+def auth_kwargs() -> Dict[str, Any]:
+    return {
+        "access_token": st.session_state.get("access_token"),
+        "refresh_token": st.session_state.get("refresh_token"),
+    }
 
 
-def handle_redirect_token():
-        # This injects JS to move access_token from URL hash to query param so Streamlit can read it.
-        html = """
-        <script>
-        (function(){
-            try {
-                const hash = window.location.hash || '';
-                if (!hash) return;
-                const params = new URLSearchParams(hash.replace(/^#/,''));
-                const token = params.get('access_token') || params.get('access-token');
-                if (!token) return;
-                // Replace URL with token in query param (so server-side Streamlit can read it), removing hash
-                const qp = new URLSearchParams(window.location.search);
-                qp.set('access_token', token);
-                const newUrl = window.location.pathname + '?' + qp.toString();
-                window.history.replaceState({}, document.title, newUrl);
-                // Optionally reload so Streamlit picks up the param
-                window.location.reload();
-            } catch(e) { console.log(e); }
-        })();
-        </script>
-        """
-        components.html(html, height=0)
+def current_user_id() -> str:
+    user = st.session_state.get("auth_user") or {}
+    return user.get("id") or ""
 
 
-def supabase_sign_in(email: str, password: str):
-    url = st.secrets.get("supabase_url")
-    anon_key = st.secrets.get("supabase_key")
-    if not url or not anon_key:
-        st.error("Supabase connection secrets are missing. Please set supabase_url and supabase_key in Streamlit secrets.")
-        return None
-    client = create_client(url, anon_key)
-    try:
-        resp = client.auth.sign_in_with_password({"email": email, "password": password})
-        # resp may contain 'session' key
-        session = resp.get("session") if isinstance(resp, dict) else resp
-        if session and isinstance(session, dict):
-            return session.get("access_token")
-        # fallback: resp may directly be a dict with access_token
-        return resp.get("access_token") if isinstance(resp, dict) else None
-    except Exception as exc:
-        st.error(f"Sign-in error: {exc}")
-        return None
+def clear_auth_state() -> None:
+    st.session_state["authenticated"] = False
+    st.session_state["auth_user"] = None
+    st.session_state["access_token"] = None
+    st.session_state["refresh_token"] = None
+    st.session_state["builder_exercise_config"] = {}
+    st.session_state["current_workout"] = {}
+    st.session_state["active_template_id"] = None
 
 
 def render_timer_component(duration_seconds: int) -> None:
@@ -171,7 +138,11 @@ def render_timer_component(duration_seconds: int) -> None:
 def render_builder_page() -> None:
     st.markdown("## Workout Builder")
     st.markdown("Design reusable templates with group-based exercise selection and clean workout structure.")
-    exercises = fetch_exercise_catalog(st.session_state.get("access_token"))
+    if not st.session_state.get("authenticated"):
+        st.warning("Please sign in using the sidebar before loading exercises and templates.")
+        return
+    auth = auth_kwargs()
+    exercises = fetch_exercise_catalog(**auth)
     groups = sorted({exercise["primary_muscle_group"] for exercise in exercises})
     grouped = {group: [e for e in exercises if e["primary_muscle_group"] == group] for group in groups}
 
@@ -217,7 +188,7 @@ def render_builder_page() -> None:
             elif not selected_exercises:
                 st.warning("Select at least one exercise for the workout.")
             else:
-                template = insert_template(template_name, description or "")
+                template = insert_template(template_name, description or "", current_user_id(), **auth)
                 if template:
                     exercise_rows = []
                     for exercise in selected_exercises:
@@ -228,9 +199,9 @@ def render_builder_page() -> None:
                             "default_reps": config.get("default_reps"),
                             "default_duration_seconds": config.get("default_duration_seconds"),
                         })
-                    if save_template_exercises(template["id"], exercise_rows):
+                    if save_template_exercises(template["id"], exercise_rows, **auth):
                         st.success("Template saved successfully.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Failed to save the workout template.")
                 else:
@@ -238,14 +209,15 @@ def render_builder_page() -> None:
 
 
 def build_workout_state(template_id: str) -> Dict[str, Any]:
-    template_exercises = fetch_template_exercises(template_id)
-    exercise_catalog = {e["id"]: e for e in fetch_exercise_catalog(st.session_state.get("access_token"))}
+    auth = auth_kwargs()
+    template_exercises = fetch_template_exercises(template_id, **auth)
+    exercise_catalog = {e["id"]: e for e in fetch_exercise_catalog(**auth)}
     workout_exercises = []
     for row in template_exercises:
         exercise = exercise_catalog.get(row["exercise_id"])
         if not exercise:
             continue
-        last_weight = fetch_recent_set_weight(exercise["id"])
+        last_weight = fetch_recent_set_weight(exercise["id"], **auth)
         row_sets = []
         for set_number in range(1, row["default_sets"] + 1):
             row_sets.append({
@@ -267,7 +239,7 @@ def build_workout_state(template_id: str) -> Dict[str, Any]:
         })
     return {
         "template_id": template_id,
-        "template_name": next((t["name"] for t in fetch_templates() if t["id"] == template_id), "Workout"),
+        "template_name": next((t["name"] for t in fetch_templates(**auth) if t["id"] == template_id), "Workout"),
         "start_time": datetime.now().isoformat(),
         "exercises": workout_exercises,
     }
@@ -286,7 +258,10 @@ def toggle_set_complete(exercise_index: int, set_index: int) -> None:
 def render_workout_logger() -> None:
     st.markdown("## Workout Logger")
     st.markdown("Start a template and track every set with one-tap controls.")
-    templates = fetch_templates()
+    if not st.session_state.get("authenticated"):
+        st.warning("Please sign in using the sidebar before loading workout templates.")
+        return
+    templates = fetch_templates(**auth_kwargs())
     if not templates:
         st.info("Create a workout template first in the Workout Builder.")
         return
@@ -297,7 +272,7 @@ def render_workout_logger() -> None:
     if st.button("Start Workout", key="start_workout"):
         st.session_state["current_workout"] = build_workout_state(selected_template["id"])
         st.session_state["active_template_id"] = selected_template["id"]
-        st.experimental_rerun()
+        st.rerun()
 
     current_workout = st.session_state.get("current_workout")
     if not current_workout or current_workout.get("template_id") != selected_template["id"]:
@@ -390,69 +365,54 @@ def finish_workout(current_workout: Dict[str, Any]) -> None:
         perceived_effort,
         total_volume,
         strava_id,
+        current_user_id(),
+        **auth_kwargs(),
     )
     if saved:
-        create_set_logs(saved["id"], set_entries)
+        create_set_logs(saved["id"], set_entries, **auth_kwargs())
         st.success("Workout saved successfully.")
         if strava_response:
             st.info(f"Strava activity created: ID {strava_id}")
         st.session_state["current_workout"] = {}
         st.session_state["active_template_id"] = None
-        st.experimental_rerun()
+        st.rerun()
     else:
         st.error("Unable to save workout to the database.")
 
 
 def main() -> None:
     init_session_state()
-    # Handle possible redirect token placed into query params by JS
-    qp = st.query_params
-    if qp.get("access_token"):
-        token = qp.get("access_token")[0]
-        st.session_state["access_token"] = token
-        # clear query params
-        st.query_params = {}
-
-    # Inject client-side handler to convert hash token to query param
-    handle_redirect_token()
 
     st.markdown("# Weightlifting Tracker")
     st.markdown("A clean, high-contrast workout builder and logging experience for the gym.")
 
-    # Sidebar auth controls
+    # Sidebar sign-in controls
     with st.sidebar:
         st.header("Account")
-        if st.session_state.get("access_token"):
-            st.success("Signed in")
+        if st.session_state.get("authenticated"):
+            user = st.session_state.get("auth_user") or {}
+            st.success(f"Signed in as {user.get('email', 'user')}")
             if st.button("Sign out"):
-                st.session_state["access_token"] = None
-                st.experimental_rerun()
+                sign_out_user(**auth_kwargs())
+                clear_auth_state()
+                st.rerun()
         else:
             st.markdown("### Sign in")
-            with st.form("auth_form"):
-                email = st.text_input("Email", key="auth_email")
-                password = st.text_input("Password", type="password", key="auth_password")
+            with st.form("signin_form"):
+                email = st.text_input("Email", key="signin_email")
+                password = st.text_input("Password", type="password", key="signin_password")
                 submitted = st.form_submit_button("Sign in")
             if submitted:
-                token = supabase_sign_in(email, password)
-                if token:
-                    st.session_state["access_token"] = token
+                auth_session = sign_in_user(email.strip(), password)
+                if auth_session and auth_session.get("access_token") and auth_session.get("user", {}).get("id"):
+                    st.session_state["authenticated"] = True
+                    st.session_state["auth_user"] = auth_session["user"]
+                    st.session_state["access_token"] = auth_session["access_token"]
+                    st.session_state["refresh_token"] = auth_session.get("refresh_token")
                     st.success("Signed in")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
-                    st.error("Sign in failed. Check credentials or Supabase settings.")
-
-            st.markdown("---")
-            st.markdown("### Passwordless (Magic Link)")
-            with st.form("magic_form"):
-                magic_email = st.text_input("Email for magic link", key="magic_email")
-                send_magic = st.form_submit_button("Send Magic Link")
-            if send_magic:
-                ok = supabase_send_magic_link(magic_email)
-                if ok:
-                    st.info("Magic link sent — check your email and click the link to sign in.")
-                else:
-                    st.error("Failed to send magic link. Check Supabase settings and email deliverability.")
+                    st.error("Email or password is incorrect.")
 
     page = st.sidebar.selectbox("Navigation", ["Workout Builder", "Workout Logger"])
     if page == "Workout Builder":
