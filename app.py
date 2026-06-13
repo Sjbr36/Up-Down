@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from database import (
     sign_in_user,
     sign_out_user,
+    request_password_reset,
     fetch_exercise_catalog,
     fetch_templates,
     fetch_template_exercises,
@@ -413,6 +414,16 @@ def main() -> None:
                     st.rerun()
                 else:
                     st.error("Email or password is incorrect.")
+
+            with st.expander("Forgot password?"):
+                reset_email = st.text_input("Reset email", key="reset_email")
+                if st.button("Send reset email", key="password_reset_button"):
+                    if not reset_email.strip():
+                        st.warning("Enter your email address first.")
+                    elif request_password_reset(reset_email.strip()):
+                        st.success("If that email exists in Supabase Auth, a reset link has been sent.")
+                    else:
+                        st.error("Unable to send the reset email right now.")
 
     page = st.sidebar.selectbox("Navigation", ["Workout Builder", "Workout Logger"])
     if page == "Workout Builder":

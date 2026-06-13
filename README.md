@@ -51,6 +51,7 @@ Notes:
 - Users sign in through Supabase Auth with email and password.
 - Use the Supabase anon public key for `supabase_key`. Do not use a service role key in the Streamlit app because service role keys bypass Row Level Security.
 - If you do not provide `strava.access_token`, Strava upload attempts will be skipped and a warning will be shown.
+- For password reset links, add an optional `password_reset_redirect_to` secret pointing at your app URL, such as `http://localhost:8501` for local testing or `https://your-streamlit-app.streamlit.app` for production.
 
 Create the first three users in Supabase Dashboard > Authentication > Users. The app does not expose public sign-up; only users you create in Supabase can sign in.
 
