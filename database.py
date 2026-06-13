@@ -94,17 +94,18 @@ def request_password_reset(email: str, access_token: Optional[str] = None, refre
         return False
 
     supabase = get_supabase_client(access_token, refresh_token)
-    payload: Dict[str, str] = {"email": email.strip()}
+    normalized_email = email.strip()
+    reset_options = None
 
     try:
         redirect_to = st.secrets.get("password_reset_redirect_to")
         if redirect_to:
-            payload["redirect_to"] = redirect_to
+            reset_options = {"redirect_to": redirect_to}
     except Exception:
         pass
 
     try:
-        supabase.auth.reset_password_for_email(payload)
+        supabase.auth.reset_password_for_email(normalized_email, reset_options)
         return True
     except Exception as exc:
         st.warning(f"Password reset request failed: {exc}")
