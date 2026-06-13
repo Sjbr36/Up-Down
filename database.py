@@ -156,16 +156,39 @@ def save_template_exercises(template_id: str, exercise_rows: List[Dict[str, Any]
     return resp is not None
 
 
-def fetch_recent_set_weight(exercise_id: str, access_token: Optional[str] = None, refresh_token: Optional[str] = None) -> float:
+def fetch_recent_set_weight(
+    exercise_id: str,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+) -> float:
     supabase = get_supabase_client(access_token, refresh_token)
-    resp = supabase.table("set_logs").select("weight_lbs").eq("exercise_id", exercise_id).order("created_at", desc=True).limit(1).execute()
+    resp = (
+        supabase.table("set_logs")
+        .select("weight_lbs")
+        .eq("exercise_id", exercise_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
     data = resp.data or []
     if data:
         return float(data[0].get("weight_lbs", 0) or 0)
     return 0.0
 
 
-def create_workout_log(template_id: str, start_time: datetime, end_time: datetime, total_duration_minutes: float, focus_areas: List[str], perceived_effort: int, total_volume_lbs: float, strava_activity_id: Optional[str], user_id: str, access_token: Optional[str] = None, refresh_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def create_workout_log(
+    template_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    total_duration_minutes: float,
+    focus_areas: List[str],
+    perceived_effort: int,
+    total_volume_lbs: float,
+    strava_activity_id: Optional[str],
+    user_id: str,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     supabase = get_supabase_client(access_token, refresh_token)
     payload = {
         "user_id": user_id,
@@ -182,7 +205,12 @@ def create_workout_log(template_id: str, start_time: datetime, end_time: datetim
     return _first_response_row(resp)
 
 
-def create_set_logs(workout_log_id: str, set_entries: List[Dict[str, Any]], access_token: Optional[str] = None, refresh_token: Optional[str] = None) -> bool:
+def create_set_logs(
+    workout_log_id: str,
+    set_entries: List[Dict[str, Any]],
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+) -> bool:
     supabase = get_supabase_client(access_token, refresh_token)
     payload = []
     for entry in set_entries:

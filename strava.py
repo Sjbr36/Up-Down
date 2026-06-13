@@ -37,7 +37,13 @@ def create_strava_activity(name: str, description: str, elapsed_seconds: int, st
     return None
 
 
-def build_strava_description(template_name: str, total_minutes: float, focus_areas: list, total_volume: float, effort: int) -> str:
+def build_strava_description(
+    template_name: str,
+    total_minutes: float,
+    focus_areas: list,
+    total_volume: float,
+    effort: int,
+) -> str:
     focus_text = ", ".join(focus_areas) if focus_areas else "General Strength"
     return (
         f"{template_name}: {int(total_minutes)} mins. Focused on {focus_text}. "
