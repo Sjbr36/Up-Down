@@ -1,10 +1,12 @@
 import streamlit as st
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from database import (
     sign_in_user,
     sign_out_user,
     request_password_reset,
+    parse_password_reset_params,
+    complete_password_reset,
     fetch_exercise_catalog,
     fetch_templates,
     fetch_template_exercises,
@@ -23,8 +25,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-PRIMARY_BUTTON_STYLE = "background-color:#0f4c81;color:white;border-radius:8px;padding:0.7rem 1rem;font-weight:bold;"
-SECONDARY_PANEL_STYLE = "background-color:#f7f9fc;border:1px solid #e1e6ef;border-radius:12px;padding:18px;margin-bottom:18px;"
+PRIMARY_BUTTON_STYLE = (
+    "background-color:#0f4c81;color:white;border-radius:8px;"
+    "padding:0.7rem 1rem;font-weight:bold;"
+)
+SECONDARY_PANEL_STYLE = (
+    "background-color:#f7f9fc;border:1px solid #e1e6ef;"
+    "border-radius:12px;padding:18px;margin-bottom:18px;"
+)
+SUPERSET_OPTIONS = ["None", "A", "B", "C"]
 
 
 def init_session_state() -> None:
@@ -66,9 +75,34 @@ def clear_auth_state() -> None:
     st.session_state["active_template_id"] = None
 
 
+def validate_superset_config(selected_exercises: List[Dict[str, Any]]) -> List[str]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for exercise in selected_exercises:
+        config = st.session_state["builder_exercise_config"].get(exercise["id"], {})
+        group = config.get("superset_group")
+        if group:
+            grouped.setdefault(group, []).append({
+                "name": exercise["name"],
+                "sets": config.get("default_sets"),
+            })
+
+    errors = []
+    for group, rows in sorted(grouped.items()):
+        if len(rows) != 2:
+            errors.append(f"Superset {group} must have exactly 2 exercises.")
+            continue
+        set_counts = {row["sets"] for row in rows}
+        if len(set_counts) > 1:
+            names = ", ".join(row["name"] for row in rows)
+            errors.append(f"Superset {group} exercises must use the same number of sets: {names}.")
+    return errors
+
+
 def render_timer_component(duration_seconds: int) -> None:
     html = """
-    <div style="font-family:Arial, sans-serif; width:100%; padding:14px; border:1px solid #d0d7e7; border-radius:16px; background:#ffffff; text-align:center;">
+    <div style="font-family:Arial, sans-serif; width:100%; padding:14px;
+      border:1px solid #d0d7e7; border-radius:16px; background:#ffffff;
+      text-align:center;">
       <div style="font-size:16px; color:#0f4c81; font-weight:700; margin-bottom:8px;">Timer</div>
       <div id="stage" style="font-size:15px; color:#475569; margin-bottom:6px;">Ready</div>
       <div id="display" style="font-size:42px; font-weight:800; color:#111827; margin-bottom:8px;">{duration}</div>
@@ -136,6 +170,41 @@ def render_timer_component(duration_seconds: int) -> None:
     components.html(html, height=260, scrolling=False)
 
 
+def get_password_reset_callback() -> Dict[str, Optional[str]]:
+    raw_params = st.query_params
+    if hasattr(raw_params, "to_dict"):
+        params = raw_params.to_dict()
+    else:
+        params = dict(raw_params or {})
+    return parse_password_reset_params(params)
+
+
+def render_password_reset_page(callback: Dict[str, Optional[str]]) -> None:
+    st.markdown("## Set a new password")
+    st.info("Supabase sent you here with a recovery token. Enter a new password below.")
+
+    with st.form("password_reset_form"):
+        new_password = st.text_input("New password", type="password")
+        confirm_password = st.text_input("Confirm password", type="password")
+        submitted = st.form_submit_button("Update password")
+
+    if submitted:
+        if not new_password or len(new_password) < 8:
+            st.error("Choose a password that is at least 8 characters long.")
+        elif new_password != confirm_password:
+            st.error("Passwords do not match.")
+        else:
+            success = complete_password_reset(
+                new_password,
+                token_hash=callback.get("token_hash"),
+                recovery_type=callback.get("type") or "recovery",
+            )
+            if success:
+                st.success("Password updated successfully. You can sign in with your new password.")
+            else:
+                st.error("Unable to update the password from this recovery link. Please request a new reset email.")
+
+
 def render_builder_page() -> None:
     st.markdown("## Workout Builder")
     st.markdown("Design reusable templates with group-based exercise selection and clean workout structure.")
@@ -157,7 +226,11 @@ def render_builder_page() -> None:
                 choices = [f"{item['name']} ({item['category']})" for item in items]
                 selected = st.multiselect(f"Select {group} exercises", choices, key=f"builder_{group}")
                 if selected:
-                    selected_exercises.extend([item for item in items if f"{item['name']} ({item['category']})" in selected])
+                    selected_exercises.extend([
+                        item
+                        for item in items
+                        if f"{item['name']} ({item['category']})" in selected
+                    ])
 
         st.markdown("---")
         if selected_exercises:
@@ -165,20 +238,47 @@ def render_builder_page() -> None:
             for exercise in selected_exercises:
                 col1, col2, col3 = st.columns([2,1,1])
                 col1.markdown(f"**{exercise['name']}** \n_{exercise['category']}_")
-                default_sets = st.number_input(f"Sets for {exercise['name']}", min_value=1, max_value=10, value=3, key=f"sets_{exercise['id']}")
+                default_sets = col2.number_input(
+                    f"Sets for {exercise['name']}",
+                    min_value=1,
+                    max_value=10,
+                    value=3,
+                    key=f"sets_{exercise['id']}",
+                )
+                superset_group_value = col3.selectbox(
+                    f"Superset for {exercise['name']}",
+                    SUPERSET_OPTIONS,
+                    key=f"superset_{exercise['id']}",
+                )
+                superset_group = None if superset_group_value == "None" else superset_group_value
                 if exercise['category'].lower() == 'timed':
-                    default_duration = st.number_input(f"Duration (sec) for {exercise['name']}", min_value=10, max_value=600, value=45, step=5, key=f"duration_{exercise['id']}")
+                    default_duration = st.number_input(
+                        f"Duration (sec) for {exercise['name']}",
+                        min_value=10,
+                        max_value=600,
+                        value=45,
+                        step=5,
+                        key=f"duration_{exercise['id']}",
+                    )
                     st.session_state["builder_exercise_config"][exercise['id']] = {
                         "default_sets": default_sets,
                         "default_reps": None,
                         "default_duration_seconds": default_duration,
+                        "superset_group": superset_group,
                     }
                 else:
-                    default_reps = st.number_input(f"Reps for {exercise['name']}", min_value=1, max_value=30, value=8, key=f"reps_{exercise['id']}")
+                    default_reps = st.number_input(
+                        f"Reps for {exercise['name']}",
+                        min_value=1,
+                        max_value=30,
+                        value=8,
+                        key=f"reps_{exercise['id']}",
+                    )
                     st.session_state["builder_exercise_config"][exercise['id']] = {
                         "default_sets": default_sets,
                         "default_reps": default_reps,
                         "default_duration_seconds": None,
+                        "superset_group": superset_group,
                     }
 
         submitted = st.form_submit_button("Save Template")
@@ -189,16 +289,29 @@ def render_builder_page() -> None:
             elif not selected_exercises:
                 st.warning("Select at least one exercise for the workout.")
             else:
+                superset_errors = validate_superset_config(selected_exercises)
+                if superset_errors:
+                    for error in superset_errors:
+                        st.warning(error)
+                    return
                 template = insert_template(template_name, description or "", current_user_id(), **auth)
                 if template:
                     exercise_rows = []
+                    superset_counts: Dict[str, int] = {}
                     for exercise in selected_exercises:
                         config = st.session_state["builder_exercise_config"].get(exercise["id"])
+                        superset_group = config.get("superset_group")
+                        superset_order = None
+                        if superset_group:
+                            superset_counts[superset_group] = superset_counts.get(superset_group, 0) + 1
+                            superset_order = superset_counts[superset_group]
                         exercise_rows.append({
                             "exercise_id": exercise["id"],
                             "default_sets": config["default_sets"],
                             "default_reps": config.get("default_reps"),
                             "default_duration_seconds": config.get("default_duration_seconds"),
+                            "superset_group": superset_group,
+                            "superset_order": superset_order,
                         })
                     if save_template_exercises(template["id"], exercise_rows, **auth):
                         st.success("Template saved successfully.")
@@ -223,7 +336,11 @@ def build_workout_state(template_id: str) -> Dict[str, Any]:
         for set_number in range(1, row["default_sets"] + 1):
             row_sets.append({
                 "set_number": set_number,
-                "weight_lbs": float(last_weight) if exercise["category"].lower() != "bodyweight" and exercise["category"].lower() != "timed" else 0,
+                "weight_lbs": (
+                    float(last_weight)
+                    if exercise["category"].lower() not in ["bodyweight", "timed"]
+                    else 0
+                ),
                 "reps_completed": row.get("default_reps") or 0,
                 "duration_actual_seconds": row.get("default_duration_seconds") or 0,
                 "is_completed": False,
@@ -236,6 +353,8 @@ def build_workout_state(template_id: str) -> Dict[str, Any]:
             "target_sets": row["default_sets"],
             "target_reps": row.get("default_reps"),
             "target_duration_seconds": row.get("default_duration_seconds"),
+            "superset_group": row.get("superset_group"),
+            "superset_order": row.get("superset_order"),
             "sets": row_sets,
         })
     return {
@@ -254,6 +373,59 @@ def adjust_set_value(exercise_index: int, set_index: int, field: str, delta: int
 def toggle_set_complete(exercise_index: int, set_index: int) -> None:
     current = st.session_state["current_workout"]["exercises"][exercise_index]["sets"][set_index]
     current["is_completed"] = not current["is_completed"]
+
+
+def render_exercise_set_controls(exercise_index: int, exercise: Dict[str, Any], set_index: int, label: str) -> None:
+    set_state = exercise["sets"][set_index]
+    row = st.columns([1, 3, 3, 1])
+    row[0].markdown(label, unsafe_allow_html=True)
+
+    if exercise["category"].lower() == "timed":
+        timer_container = row[1].empty()
+        with timer_container:
+            render_timer_component(exercise["target_duration_seconds"] or 45)
+        duration_cols = row[2].columns([1,1,1])
+        duration_cols[0].button("-5s", key=f"duration_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"duration_actual_seconds","delta":-5,"min_value":0})
+        duration_cols[1].markdown(f"{set_state['duration_actual_seconds']} sec")
+        duration_cols[2].button("+5s", key=f"duration_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"duration_actual_seconds","delta":5,"min_value":0})
+    else:
+        weight_cols = row[1].columns([1,1,1])
+        if exercise["category"].lower() != "bodyweight":
+            weight_cols[0].button("-5 lbs", key=f"weight_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"weight_lbs","delta":-5,"min_value":0})
+            weight_cols[1].button(f"{int(set_state['weight_lbs'])} lbs", key=f"weight_display_{exercise_index}_{set_index}")
+            weight_cols[2].button("+5 lbs", key=f"weight_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"weight_lbs","delta":5,"min_value":0})
+        else:
+            row[1].markdown("Bodyweight exercise - weight tracking hidden.")
+
+        rep_cols = row[2].columns([1,1,1])
+        rep_cols[0].button("-1", key=f"rep_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"reps_completed","delta":-1,"min_value":0})
+        rep_cols[1].markdown(f"{set_state['reps_completed']} reps")
+        rep_cols[2].button("+1", key=f"rep_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"reps_completed","delta":1,"min_value":0})
+
+    completed_label = "Completed" if set_state["is_completed"] else "Mark Done"
+    row[3].button(completed_label, key=f"complete_{exercise_index}_{set_index}", on_click=toggle_set_complete, kwargs={"exercise_index":exercise_index,"set_index":set_index})
+
+
+def render_regular_exercise(exercise_index: int, exercise: Dict[str, Any]) -> None:
+    with st.container():
+        st.markdown(f"<div style='{SECONDARY_PANEL_STYLE}'> <strong>{exercise['name']}</strong> - {exercise['category']} | {exercise['primary_muscle_group']}</div>", unsafe_allow_html=True)
+        for set_index, set_state in enumerate(exercise["sets"]):
+            render_exercise_set_controls(exercise_index, exercise, set_index, f"**Set {set_state['set_number']}**")
+
+
+def render_superset(group: str, indexed_exercises: List[tuple[int, Dict[str, Any]]]) -> None:
+    ordered = sorted(indexed_exercises, key=lambda item: item[1].get("superset_order") or 99)
+    max_sets = max((len(exercise["sets"]) for _, exercise in ordered), default=0)
+    names = " + ".join(exercise["name"] for _, exercise in ordered)
+
+    with st.container():
+        st.markdown(f"<div style='{SECONDARY_PANEL_STYLE}'> <strong>Superset {group}</strong> - {names}</div>", unsafe_allow_html=True)
+        for set_index in range(max_sets):
+            for exercise_index, exercise in ordered:
+                if set_index >= len(exercise["sets"]):
+                    continue
+                set_number = exercise["sets"][set_index]["set_number"]
+                render_exercise_set_controls(exercise_index, exercise, set_index, f"**{exercise['name']}**<br>Set {set_number}")
 
 
 def render_workout_logger() -> None:
@@ -281,37 +453,21 @@ def render_workout_logger() -> None:
 
     st.markdown(f"### {current_workout['template_name']} | Started at {datetime.fromisoformat(current_workout['start_time']).strftime('%H:%M:%S')}")
 
+    superset_groups: Dict[str, List[tuple[int, Dict[str, Any]]]] = {}
     for exercise_index, exercise in enumerate(current_workout["exercises"]):
-        with st.container():
-            st.markdown(f"<div style='{SECONDARY_PANEL_STYLE}'> <strong>{exercise['name']}</strong> — {exercise['category']} | {exercise['primary_muscle_group']}</div>", unsafe_allow_html=True)
-            for set_index, set_state in enumerate(exercise["sets"]):
-                row = st.columns([1, 3, 3, 1])
-                row[0].markdown(f"**Set {set_state['set_number']}**")
+        group = exercise.get("superset_group")
+        if group:
+            superset_groups.setdefault(group, []).append((exercise_index, exercise))
 
-                if exercise["category"].lower() == "timed":
-                    timer_container = row[1].empty()
-                    with timer_container:
-                        render_timer_component(exercise["target_duration_seconds"] or 45)
-                    duration_cols = row[2].columns([1,1,1])
-                    duration_cols[0].button("-5s", key=f"duration_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"duration_actual_seconds","delta":-5,"min_value":0})
-                    duration_cols[1].markdown(f"{set_state['duration_actual_seconds']} sec")
-                    duration_cols[2].button("+5s", key=f"duration_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"duration_actual_seconds","delta":5,"min_value":0})
-                else:
-                    weight_cols = row[1].columns([1,1,1])
-                    if exercise["category"].lower() != "bodyweight":
-                        weight_cols[0].button("-5 lbs", key=f"weight_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"weight_lbs","delta":-5,"min_value":0})
-                        weight_cols[1].button(f"{int(set_state['weight_lbs'])} lbs", key=f"weight_display_{exercise_index}_{set_index}")
-                        weight_cols[2].button("+5 lbs", key=f"weight_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"weight_lbs","delta":5,"min_value":0})
-                    else:
-                        row[1].markdown("Bodyweight exercise — weight tracking hidden.")
-
-                    rep_cols = row[2].columns([1,1,1])
-                    rep_cols[0].button("-1", key=f"rep_minus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"reps_completed","delta":-1,"min_value":0})
-                    rep_cols[1].markdown(f"{set_state['reps_completed']} reps")
-                    rep_cols[2].button("+1", key=f"rep_plus_{exercise_index}_{set_index}", on_click=adjust_set_value, kwargs={"exercise_index":exercise_index,"set_index":set_index,"field":"reps_completed","delta":1,"min_value":0})
-
-                completed_label = "Completed" if set_state["is_completed"] else "Mark Done"
-                row[3].button(completed_label, key=f"complete_{exercise_index}_{set_index}", on_click=toggle_set_complete, kwargs={"exercise_index":exercise_index,"set_index":set_index})
+    rendered_supersets = set()
+    for exercise_index, exercise in enumerate(current_workout["exercises"]):
+        group = exercise.get("superset_group")
+        if group and len(superset_groups.get(group, [])) == 2:
+            if group not in rendered_supersets:
+                render_superset(group, superset_groups[group])
+                rendered_supersets.add(group)
+            continue
+        render_regular_exercise(exercise_index, exercise)
 
     if st.button("Finish Workout", key="finish_workout"):
         finish_workout(current_workout)
@@ -383,6 +539,11 @@ def finish_workout(current_workout: Dict[str, Any]) -> None:
 
 def main() -> None:
     init_session_state()
+
+    password_reset_callback = get_password_reset_callback()
+    if password_reset_callback.get("token_hash") and password_reset_callback.get("type") == "recovery":
+        render_password_reset_page(password_reset_callback)
+        return
 
     st.markdown("# Weightlifting Tracker")
     st.markdown("A clean, high-contrast workout builder and logging experience for the gym.")

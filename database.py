@@ -1,7 +1,7 @@
 import streamlit as st
 from supabase import create_client, Client
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 def _execute_write(builder: Any) -> Optional[Any]:
@@ -89,6 +89,49 @@ def sign_out_user(access_token: Optional[str] = None, refresh_token: Optional[st
         pass
 
 
+def parse_password_reset_params(raw_params: Optional[Mapping[str, Any]] = None) -> Dict[str, Optional[str]]:
+    params = dict(raw_params or {})
+    token_hash = params.get("token_hash") or params.get("token") or params.get("access_token")
+    recovery_type = params.get("type") or ("recovery" if token_hash else None)
+    return {
+        "token_hash": token_hash,
+        "type": recovery_type,
+    }
+
+
+def complete_password_reset(
+    new_password: str,
+    token_hash: Optional[str] = None,
+    recovery_type: str = "recovery",
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+) -> bool:
+    if not new_password or not token_hash:
+        return False
+
+    supabase = get_supabase_client(access_token, refresh_token)
+    try:
+        verify_params = {
+            "token_hash": token_hash,
+            "type": recovery_type,
+            "password": new_password,
+        }
+        resp = supabase.auth.verify_otp(verify_params)
+    except Exception as exc:
+        st.warning(f"Password reset verification failed: {exc}")
+        return False
+
+    if getattr(resp, "session", None):
+        return True
+
+    try:
+        update_resp = supabase.auth.update_user({"password": new_password})
+        return bool(getattr(update_resp, "user", None) or getattr(update_resp, "data", None))
+    except Exception as exc:
+        st.warning(f"Password update failed: {exc}")
+        return False
+
+
 def request_password_reset(email: str, access_token: Optional[str] = None, refresh_token: Optional[str] = None) -> bool:
     if not email:
         return False
@@ -152,6 +195,8 @@ def save_template_exercises(template_id: str, exercise_rows: List[Dict[str, Any]
             "default_sets": row["default_sets"],
             "default_reps": row.get("default_reps"),
             "default_duration_seconds": row.get("default_duration_seconds"),
+            "superset_group": row.get("superset_group"),
+            "superset_order": row.get("superset_order"),
         })
     resp = _execute_write(supabase.table("template_exercises").insert(payload))
     return resp is not None

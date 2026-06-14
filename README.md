@@ -4,7 +4,7 @@ A Streamlit frontend with Supabase (Postgres) backend for building and logging w
 
 ## What's included
 
-- Database migration: `migrations/0001_weightlifting_schema.sql`
+- Database migrations: `migrations/0001_weightlifting_schema.sql`, `migrations/0002_user_auth_rls.sql`, `migrations/0003_supersets.sql`
 - Streamlit app: `app.py`
 - Supabase integration helper: `database.py`
 - Strava integration helper: `strava.py`
@@ -51,7 +51,7 @@ Notes:
 - Users sign in through Supabase Auth with email and password.
 - Use the Supabase anon public key for `supabase_key`. Do not use a service role key in the Streamlit app because service role keys bypass Row Level Security.
 - If you do not provide `strava.access_token`, Strava upload attempts will be skipped and a warning will be shown.
-- For password reset links, add an optional `password_reset_redirect_to` secret pointing at your app URL, such as `http://localhost:8501` for local testing or `https://your-streamlit-app.streamlit.app` for production.
+- For password reset links, add an optional `password_reset_redirect_to` secret pointing at your app URL, such as `http://localhost:8501` for local testing or `https://your-streamlit-app.streamlit.app` for production. The app will read the recovery token from that URL and show a password-entry form automatically.
 
 Create the first three users in Supabase Dashboard > Authentication > Users. The app does not expose public sign-up; only users you create in Supabase can sign in.
 
@@ -62,11 +62,14 @@ Apply the SQL migrations in order with the Supabase SQL editor, or via `psql` if
 ```bash
 psql "postgresql://<db_user>:<db_password>@<host>:5432/<db_name>" -f migrations/0001_weightlifting_schema.sql
 psql "postgresql://<db_user>:<db_password>@<host>:5432/<db_name>" -f migrations/0002_user_auth_rls.sql
+psql "postgresql://<db_user>:<db_password>@<host>:5432/<db_name>" -f migrations/0003_supersets.sql
 ```
 
 Or paste the contents of each migration into the Supabase SQL editor and run them in filename order.
 
 `0002_user_auth_rls.sql` adds `user_id` ownership columns and enables Row Level Security so each authenticated user can only access their own workout templates, workout logs, and set history. Existing templates and workout logs without a `user_id` will be hidden by RLS until you assign them to a Supabase Auth user.
+
+`0003_supersets.sql` adds optional superset metadata for template exercises.
 
 5. Run the app
 
@@ -109,6 +112,7 @@ docker run -p 8501:8501 \
 ## Notes and tips
 
 - The app uses button-only interactions for quick gym use (weight +/-5, reps +/-1).
+- Template exercises can be paired into two-exercise supersets labeled A, B, or C; the logger alternates each pair by set number.
 - Timed exercises render an inline timer with 5s count-in and 5s count-out and an automatic beep.
 - Strava integration creates `WeightTraining` activities — ensure `strava.access_token` has `write` scopes.
 
